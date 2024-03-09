@@ -223,6 +223,9 @@ function updateConnectivityNodes(element, parent, name) {
     });
     return updates;
 }
+export function hasIedCoordinates(ied) {
+    return !!(ied.getAttributeNS(sldNs, 'x') && ied.getAttributeNS(sldNs, 'y'));
+}
 export function uniqueName(element, parent) {
     var _a, _b, _c;
     const children = Array.from(parent.children);
