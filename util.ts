@@ -58,6 +58,7 @@ export function uuid() {
 
 const transformerKinds = ['default', 'auto', 'earthing'] as const;
 export type Point = [number, number];
+
 export type TransformerKind = (typeof transformerKinds)[number];
 export type Attrs = {
   pos: Point;
@@ -306,10 +307,6 @@ function updateConnectivityNodes(
   return updates;
 }
 
-export function hasIedCoordinates(ied: Element): boolean {
-  return !!(ied.getAttributeNS(sldNs, 'x') && ied.getAttributeNS(sldNs, 'y'));
-}
-
 export function uniqueName(element: Element, parent: Element): string {
   const children = Array.from(parent.children);
   const oldName = element.getAttribute('name');
@@ -339,10 +336,10 @@ export function reparentElement(element: Element, parent: Element): Edit[] {
     parent,
     reference: getReference(parent, element.tagName),
   });
-  const newName = uniqueName(element, parent);
-  if (newName !== element.getAttribute('name'))
-    edits.push({ element, attributes: { name: newName } });
-  edits.push(...updateConnectivityNodes(element, parent, newName));
+  const name = uniqueName(element, parent);
+  if (element.localName !== 'IEDName' && name !== element.getAttribute('name'))
+    edits.push({ element, attributes: { name } });
+  edits.push(...updateConnectivityNodes(element, parent, name));
   return edits;
 }
 

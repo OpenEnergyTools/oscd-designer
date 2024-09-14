@@ -8,11 +8,16 @@ import { getReference } from '@openscd/oscd-scl';
 
 import type { Dialog } from '@material/mwc-dialog';
 import type { IconButtonToggle } from '@material/mwc-icon-button-toggle';
+import type { Menu } from '@material/mwc-menu';
+import type { List, SingleSelectedEvent } from '@material/mwc-list';
+import type { ListItem } from '@material/mwc-list/mwc-list-item.js';
+
 import '@material/mwc-button';
 import '@material/mwc-fab';
 import '@material/mwc-icon-button';
 import '@material/mwc-icon-button-toggle';
 import '@material/mwc-icon';
+import '@material/mwc-menu';
 
 import './sld-editor.js';
 
@@ -23,7 +28,6 @@ import {
   ConnectEvent,
   elementPath,
   eqTypes,
-  hasIedCoordinates,
   isBusBar,
   PlaceEvent,
   PlaceLabelEvent,
@@ -176,11 +180,23 @@ export default class Designer extends LitElement {
     return true;
   }
 
+  @state()
+  get showIeds(): boolean {
+    if (this.iedToggle) return this.iedToggle.on;
+    return true;
+  }
+
   @query('#labels')
   labelToggle?: IconButtonToggle;
 
+  @query('#ieds')
+  iedToggle?: IconButtonToggle;
+
   @query('#about')
   about?: Dialog;
+
+  @query('#iedMenu')
+  iedMenu?: Menu;
 
   zoomIn() {
     this.gridSize += 3;
@@ -241,6 +257,10 @@ export default class Designer extends LitElement {
   }
 
   updated(changedProperties: Map<string, any>) {
+    // TODO: Is there a more elegant way to do this?
+    if (this.iedMenu)
+      this.iedMenu.anchor = this.iedMenu.previousElementSibling as HTMLElement;
+
     if (!changedProperties.has('doc')) return;
     const sldNsPrefix = this.doc.documentElement.lookupPrefix(sldNs);
     if (sldNsPrefix) {
@@ -267,7 +287,7 @@ export default class Designer extends LitElement {
   }
 
   rotateElement(element: Element) {
-    const { rot } = attributes(element);
+    const { rot } = attributes(element)!;
     const edits = [
       {
         element,
@@ -322,7 +342,7 @@ export default class Designer extends LitElement {
       let lx = oldLX;
       let ly = oldLY;
       if (
-        element.tagName === 'ConductingEquipment' &&
+        element.localName === 'ConductingEquipment' &&
         !element.hasAttributeNS(sldNs, 'lx') &&
         rot % 2 === 0
       ) {
@@ -330,7 +350,7 @@ export default class Designer extends LitElement {
         ly += 1;
       }
       if (
-        element.tagName === 'PowerTransformer' &&
+        element.localName === 'PowerTransformer' &&
         !element.hasAttributeNS(sldNs, 'lx')
       ) {
         if (rot < 2) lx += 1.5;
@@ -339,6 +359,14 @@ export default class Designer extends LitElement {
           ly += 2;
         }
       }
+      if (
+        element.localName === 'IEDName' &&
+        !element.hasAttributeNS(sldNs, 'lx')
+      ) {
+        lx += 1;
+        ly += 1;
+      }
+
       edits.push({
         element,
         attributes: {
@@ -374,30 +402,32 @@ export default class Designer extends LitElement {
       element.querySelectorAll(
         'Bay, ConductingEquipment, PowerTransformer, Vertex'
       )
-    ).forEach(descendant => {
-      const {
-        pos: [descX, descY],
-        label: [descLX, descLY],
-      } = attributes(descendant);
-      const newAttributes: Update['attributes'] = {
-        x: { namespaceURI: sldNs, value: (descX + dx).toString() },
-        y: { namespaceURI: sldNs, value: (descY + dy).toString() },
-      };
-      if (descendant.localName !== 'Vertex') {
-        newAttributes.lx = {
-          namespaceURI: sldNs,
-          value: (descLX + dx).toString(),
+    )
+      .concat(Array.from(element.getElementsByTagNameNS(sldNs, 'IEDName')))
+      .forEach(descendant => {
+        const {
+          pos: [descX, descY],
+          label: [descLX, descLY],
+        } = attributes(descendant);
+        const newAttributes: Update['attributes'] = {
+          x: { namespaceURI: sldNs, value: (descX + dx).toString() },
+          y: { namespaceURI: sldNs, value: (descY + dy).toString() },
         };
-        newAttributes.ly = {
-          namespaceURI: sldNs,
-          value: (descLY + dy).toString(),
-        };
-      }
-      edits.push({
-        element: descendant,
-        attributes: newAttributes,
+        if (descendant.localName !== 'Vertex') {
+          newAttributes.lx = {
+            namespaceURI: sldNs,
+            value: (descLX + dx).toString(),
+          };
+          newAttributes.ly = {
+            namespaceURI: sldNs,
+            value: (descLY + dy).toString(),
+          };
+        }
+        edits.push({
+          element: descendant,
+          attributes: newAttributes,
+        });
       });
-    });
 
     if (
       element.tagName === 'ConductingEquipment' ||
@@ -517,7 +547,57 @@ export default class Designer extends LitElement {
       }
     }
 
+    const oldParent = element.parentElement;
+
     this.dispatchEvent(newEditEvent(edits));
+
+    // wrap IEDName elements within Private element if required
+    const enclosingEdits: Edit[] = [];
+    if (
+      element.localName === 'IEDName' &&
+      element.namespaceURI === sldNs &&
+      element.parentElement &&
+      element.parentElement?.tagName !== 'Private'
+    ) {
+      let privateElement: Element | null = element.parentElement!.querySelector(
+        ':scope > Private[type="OpenSCD-Linked-IEDs"]'
+      );
+
+      if (!privateElement) {
+        privateElement = this.doc.createElementNS(
+          this.doc.documentElement.namespaceURI,
+          'Private'
+        );
+        privateElement.setAttribute('type', 'OpenSCD-Linked-IEDs');
+      }
+
+      privateElement.appendChild(element.cloneNode());
+
+      enclosingEdits.push(
+        {
+          parent: element.parentElement!,
+          node: privateElement,
+          reference: getReference(element.parentElement!, 'Private'),
+        },
+        {
+          node: element,
+        }
+      );
+    }
+
+    // remove empty Private element if required
+    if (
+      element.localName === 'IEDName' &&
+      oldParent?.tagName === 'Private' &&
+      oldParent?.getAttribute('type') === 'OpenSCD-Linked-IEDs' &&
+      oldParent.childElementCount === 0
+    ) {
+      // TODO: In next API release, dispatch with "squash" to support undo/redo more cleanly
+      enclosingEdits.push({ node: oldParent });
+    }
+
+    if (enclosingEdits.length) this.dispatchEvent(newEditEvent(enclosingEdits));
+
     if (
       ['Bay', 'VoltageLevel'].includes(element.tagName) &&
       (!element.hasAttributeNS(sldNs, 'w') ||
@@ -667,6 +747,21 @@ export default class Designer extends LitElement {
 
   render() {
     if (!this.doc) return html`<p>Please open an SCL document</p>`;
+
+    const ieds = Array.from(this.doc.querySelectorAll(':root > IED'));
+
+    const linkedIeds = Array.from(
+      this.doc.querySelectorAll(':root > Substation')
+    ).flatMap(sub => Array.from(sub.getElementsByTagNameNS(sldNs, 'IEDName')));
+
+    const unmatchedLinkedIeds = linkedIeds.filter(
+      linkedIed =>
+        !ieds.find(
+          ied =>
+            ied.getAttribute('name') === linkedIed.getAttributeNS(sldNs, 'name')
+        )
+    ).length;
+
     return html`<main>
       <nav class="equipment">
         ${
@@ -724,18 +819,159 @@ export default class Designer extends LitElement {
         c => c.tagName === 'Substation'
       )
         ? html`<mwc-fab
-            mini
-            label="Add VoltageLevel"
-            title="Add VoltageLevel"
-            @click=${() => {
-              const element =
-                this.templateElements.VoltageLevel!.cloneNode() as Element;
-              this.startPlacing(element);
-            }}
-            style="--mdc-theme-secondary: #F5E214;"
-          >
-            ${voltageLevelIcon}
-          </mwc-fab>`
+              mini
+              label="Add VoltageLevel"
+              title="Add VoltageLevel"
+              @click=${() => {
+                const element =
+                  this.templateElements.VoltageLevel!.cloneNode() as Element;
+                this.startPlacing(element);
+              }}
+              style="--mdc-theme-secondary: #F5E214;"
+            >
+              ${voltageLevelIcon}
+            </mwc-fab>
+            ${ieds.length > 0 || unmatchedLinkedIeds > 0
+              ? html`<mwc-fab
+                    mini
+                    icon="developer_board"
+                    label="Add IED"
+                    title="Add IED"
+                    @click=${() => {
+                      if (this.iedToggle) this.iedToggle.on = true;
+                      this.iedMenu!.show();
+                    }}
+                  ></mwc-fab>
+                  <mwc-menu
+                    fixed
+                    corner="BOTTOM_RIGHT"
+                    menuCorner="END"
+                    id="iedMenu"
+                    @selected=${(ev: SingleSelectedEvent) => {
+                      const selectedListItem = (ev.target as List)
+                        .selected! as ListItem;
+                      if (!selectedListItem) return;
+
+                      const name = selectedListItem.dataset.name!;
+                      selectedListItem.selected = false;
+
+                      if (name === 'Delete Unmatched') {
+                        const edits: Edit[] = [];
+                        const editParents: Element[] = [];
+                        linkedIeds
+                          .filter(
+                            linkedIed =>
+                              !ieds.find(
+                                ied =>
+                                  ied.getAttribute('name') ===
+                                  linkedIed.getAttributeNS(sldNs, 'name')
+                              )
+                          )
+                          .forEach(unusedLinkedIed => {
+                            edits.push({ node: unusedLinkedIed });
+                            editParents.push(unusedLinkedIed.parentElement!);
+                          });
+
+                        this.dispatchEvent(newEditEvent(edits));
+
+                        // TODO: Without a lot of dispatching not easy to tell if the parent
+                        // Private is now empty
+                        // In next API release, dispatch with "squash" to support undo/redo more cleanly
+                        editParents.forEach(linkedIedParent => {
+                          if (
+                            linkedIedParent.getElementsByTagNameNS(
+                              sldNs,
+                              'IEDName'
+                            ).length === 0
+                          )
+                            this.dispatchEvent(
+                              newEditEvent({ node: linkedIedParent })
+                            );
+                        });
+                      } else {
+                        const element = this.insertOrGetIed(name, this.doc);
+                        this.iedMenu!.close();
+
+                        this.startPlacing(element);
+                      }
+                    }}
+                  >
+                    ${unmatchedLinkedIeds > 0
+                      ? html`<mwc-list-item
+                          style="--mdc-theme-text-primary-on-background: #BB1326; --mdc-theme-text-icon-on-background: #BB1326;"
+                          graphic="control"
+                          hasMeta
+                          data-name="Delete Unmatched"
+                        >
+                          <span
+                            >Remove ${unmatchedLinkedIeds} missing
+                            IED${unmatchedLinkedIeds > 1 ? 's' : ''} from
+                            SLD</span
+                          >
+                          <mwc-icon slot="graphic">delete</mwc-icon>
+                        </mwc-list-item>`
+                      : nothing}
+                    ${Array.from(ieds)
+                      .sort((a, b) => {
+                        const aName = a.getAttribute('name')!;
+                        const bName = b.getAttribute('name')!;
+
+                        const aPlaced = linkedIeds.find(
+                          ied =>
+                            ied.getAttributeNS(sldNs, 'name') === aName &&
+                            ied.hasAttributeNS(sldNs, 'x')
+                        )
+                          ? 'A'
+                          : 'B';
+                        const bPlaced = linkedIeds.find(
+                          ied =>
+                            ied.getAttributeNS(sldNs, 'name') === bName &&
+                            ied.hasAttributeNS(sldNs, 'x')
+                        )
+                          ? 'A'
+                          : 'B';
+
+                        return `${bPlaced} ${bName.toLowerCase()}`.localeCompare(
+                          `${aPlaced} ${aName.toLowerCase()}`
+                        );
+                      })
+                      .map(ied => {
+                        const linkedIed = linkedIeds.find(
+                          lIed =>
+                            lIed.getAttributeNS(sldNs, 'name') ===
+                              ied.getAttribute('name') &&
+                            lIed.hasAttributeNS(sldNs, 'x')
+                        );
+
+                        return html`<mwc-list-item
+                          twoline
+                          graphic="control"
+                          ?hasMeta=${!!linkedIeds.find(
+                            placedIed =>
+                              ied.getAttribute('name') ===
+                                placedIed.getAttributeNS(sldNs, 'name') &&
+                              placedIed.hasAttributeNS(sldNs, 'x')
+                          )}
+                          data-name="${ied.getAttribute('name')!}"
+                        >
+                          <span>${ied.getAttribute('name')!}</span>
+                          <span slot="secondary"
+                            >${[
+                              ied.getAttribute('manufacturer'),
+                              ied.getAttribute('type'),
+                              ied.getAttribute('desc'),
+                            ]
+                              .filter(a => !!a)
+                              .join(' - ')}
+                          </span>
+                          ${linkedIed
+                            ? html`<mwc-icon slot="meta">pin_drop</mwc-icon>`
+                            : nothing}
+                          <mwc-icon slot="graphic">developer_board</mwc-icon>
+                        </mwc-list-item>`;
+                      })}
+                  </mwc-menu>`
+              : nothing}`
         : nothing
     }<mwc-fab
           mini
@@ -877,38 +1113,58 @@ export default class Designer extends LitElement {
                   >${ptrIcon(2, { kind: 'earthing' })}</mwc-fab
                 >`
             : nothing
-        }${
-      this.doc.querySelector('VoltageLevel, PowerTransformer')
-        ? html`<mwc-icon-button-toggle
-            id="labels"
-            label="Toggle Labels"
-            title="Toggle Labels"
-            on
-            onIcon="font_download"
-            offIcon="font_download_off"
-            @click=${() => this.requestUpdate()}
-          ></mwc-icon-button-toggle>`
-        : nothing
-    }${
-      this.doc.querySelector('Substation')
-        ? html`<mwc-icon-button
-              icon="zoom_in"
-              label="Zoom In"
-              title="Zoom In (${Math.round((100 * (this.gridSize + 3)) / 32)}%)"
-              @click=${() => this.zoomIn()}
-            >
-            </mwc-icon-button
-            ><mwc-icon-button
-              icon="zoom_out"
-              label="Zoom Out"
-              ?disabled=${this.gridSize < 4}
-              title="Zoom Out (${Math.round(
-                (100 * (this.gridSize - 3)) / 32
-              )}%)"
-              @click=${() => this.zoomOut()}
-            ></mwc-icon-button>`
-        : nothing
-    }
+        }
+        ${
+          this.doc.querySelector('VoltageLevel, PowerTransformer')
+            ? html`<mwc-icon-button-toggle
+                id="labels"
+                label="Toggle Labels"
+                title="Toggle Labels"
+                on
+                onIcon="font_download"
+                offIcon="font_download_off"
+                @click=${() => this.requestUpdate()}
+              ></mwc-icon-button-toggle>`
+            : nothing
+        }
+        ${
+          (ieds.length > 0 || unmatchedLinkedIeds > 0) &&
+          this.doc.querySelector(':root > Substation')
+            ? html`<mwc-icon-button-toggle
+                id="ieds"
+                label="Toggle IEDs"
+                title="Toggle IEDs"
+                on
+                onIcon="developer_board"
+                offIcon="developer_board_off"
+                @click=${() => {
+                  if (this.iedMenu) this.requestUpdate();
+                }}
+              ></mwc-icon-button-toggle>`
+            : nothing
+        }
+        ${
+          this.doc.querySelector('Substation')
+            ? html`<mwc-icon-button
+                  icon="zoom_in"
+                  label="Zoom In"
+                  title="Zoom In (${Math.round(
+                    (100 * (this.gridSize + 3)) / 32
+                  )}%)"
+                  @click=${() => this.zoomIn()}
+                >
+                </mwc-icon-button
+                ><mwc-icon-button
+                  icon="zoom_out"
+                  label="Zoom Out"
+                  ?disabled=${this.gridSize < 4}
+                  title="Zoom Out (${Math.round(
+                    (100 * (this.gridSize - 3)) / 32
+                  )}%)"
+                  @click=${() => this.zoomOut()}
+                ></mwc-icon-button>`
+            : nothing
+        }
         </mwc-icon-button
         >${
           this.placing ||
@@ -930,25 +1186,6 @@ export default class Designer extends LitElement {
               ></mwc-icon-button>`
         }
       </nav>
-      <nav class="ieds">
-        ${
-          this.doc.querySelector(':root > IED')
-            ? Array.from(this.doc.querySelectorAll(':root > IED'))
-                .filter(ied => !hasIedCoordinates(ied))
-                .map(
-                  ied =>
-                    html`<mwc-fab
-                      mini
-                      icon="developer_board"
-                      title="${ied.getAttribute('name')!}"
-                      @click=${() => {
-                        this.startPlacing(ied);
-                      }}
-                    ></mwc-fab>`
-                )
-            : nothing
-        }
-      </nav>
       ${Array.from(this.doc.querySelectorAll(':root > Substation')).map(
         subs =>
           html`<sld-editor
@@ -963,6 +1200,7 @@ export default class Designer extends LitElement {
             .placingLabel=${this.placingLabel}
             .connecting=${this.connecting}
             .showLabels=${this.showLabels}
+            .showIeds=${this.showIeds}
             @oscd-sld-start-resize-br=${({ detail }: StartEvent) => {
               this.startResizingBottomRight(detail);
             }}
@@ -1024,7 +1262,9 @@ export default class Designer extends LitElement {
             }}
             @oscd-sld-place=${({
               detail: { element, parent, x, y },
-            }: PlaceEvent) => this.placeElement(element, parent, x, y)}
+            }: PlaceEvent) => {
+              this.placeElement(element, parent, x, y);
+            }}
             @oscd-sld-place-label=${({
               detail: { element, x, y },
             }: PlaceLabelEvent) => this.placeLabel(element, x, y)}
@@ -1041,6 +1281,19 @@ export default class Designer extends LitElement {
           close
         </mwc-button>
       </mwc-dialog>`}`;
+  }
+
+  insertOrGetIed(name: string, doc: XMLDocument): Element {
+    const linkedIed = Array.from(
+      doc.getElementsByTagNameNS(sldNs, 'IEDName') ?? []
+    ).find(lIed => lIed.getAttributeNS(sldNs, 'name') === name);
+
+    if (linkedIed) return linkedIed;
+
+    const newLinkedIed = doc.createElementNS(sldNs, `${this.nsp}:IEDName`);
+    newLinkedIed.setAttributeNS(sldNs, `${this.nsp}:name`, name);
+
+    return newLinkedIed;
   }
 
   insertSubstation() {
@@ -1063,6 +1316,7 @@ export default class Designer extends LitElement {
     main {
       padding: 16px;
       width: fit-content;
+      position: relative;
     }
 
     div {
@@ -1079,19 +1333,6 @@ export default class Designer extends LitElement {
       background: #fffd;
       border-radius: 24px;
       z-index: 1;
-    }
-
-    nav.ieds {
-      user-select: none;
-      position: sticky;
-      top: 100px;
-      left: 16px;
-      width: fit-content;
-      max-width: calc(100vw - 32px);
-      background: #fffd;
-      border-radius: 24px;
-      z-index: 1;
-      margin-top: 16px;
     }
 
     mwc-icon-button,
